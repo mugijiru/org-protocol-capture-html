@@ -2,7 +2,7 @@
 
 ;; URL: https://github.com/alphapapa/org-protocol-capture-html
 ;; Version: 0.1-pre
-;; Package-Requires: ((emacs "24.4"))
+;; Package-Requires: ((emacs "25.1"))
 
 ;;; Commentary:
 
