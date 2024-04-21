@@ -2,7 +2,7 @@
 
 ;; URL: https://github.com/alphapapa/org-protocol-capture-html
 ;; Version: 0.1-pre
-;; Package-Requires: ((emacs "24.4"))
+;; Package-Requires: ((emacs "25.1"))
 
 ;;; Commentary:
 
@@ -143,113 +143,104 @@ Pandoc, converting HTML to Org-mode."
 
 (defvar url-http-end-of-headers)
 
-(eval-when-compile
-  ;; eww-readable only works on Emacs >=25.1, but I think it's better
-  ;; to check for the actual symbols.  I think using
-  ;; `eval-when-compile' is the right way to do this, but I'm not
-  ;; sure.
-  (when (and (require 'eww nil t)
-             (require 'dom nil t)
-             (fboundp 'eww-score-readability))
+(defun org-protocol-capture-html--capture-eww-readable (data)
+  "Capture content of URL with eww-readable.."
 
-    (defun org-protocol-capture-html--capture-eww-readable (data)
-      "Capture content of URL with eww-readable.."
+  (unless org-protocol-capture-html-pandoc-no-wrap-option
+    (org-protocol-capture-html--define-pandoc-wrap-const))
 
-      (unless org-protocol-capture-html-pandoc-no-wrap-option
-        (org-protocol-capture-html--define-pandoc-wrap-const))
+  (let* ((template (or (plist-get data :template)
+                       org-protocol-default-template-key))
+         (url (org-protocol-sanitize-uri (plist-get data :url)))
+         (type (if (string-match "^\\([a-z]+\\):" url)
+                   (match-string 1 url)))
+         (html (org-protocol-capture-html--url-html url))
+         (result (org-protocol-capture-html--eww-readable html))
+         (title (cdr result))
+         (content (with-temp-buffer
+                    (insert (org-protocol-capture-html--nbsp-to-space (car result)))
+                    ;; Convert to Org with Pandoc
+                    (unless (= 0 (call-process-region (point-min) (point-max)
+                                                      "pandoc" t t nil "-f" "html" "-t" "org"
+                                                      org-protocol-capture-html-pandoc-no-wrap-option))
+                      (error "Pandoc failed"))
+                    (save-excursion
+                      ;; Remove DOS CR/LF line endings
+                      (goto-char (point-min))
+                      (while (search-forward (string ?\C-m) nil t)
+                        (replace-match "")))
+                    ;; Demote page headings in capture buffer to below the
+                    ;; top-level Org heading and "Article" 2nd-level heading
+                    (save-excursion
+                      (goto-char (point-min))
+                      (while (re-search-forward (rx bol (1+ "*") (1+ space)) nil t)
+                        (beginning-of-line)
+                        (insert "**")
+                        (end-of-line)))
+                    (buffer-string)))
+         (orglink (org-make-link-string
+                   url (if (s-present? title) title url)))
+         ;; Avoid call to org-store-link
+         (org-capture-link-is-already-stored t))
 
-      (let* ((template (or (plist-get data :template)
-                           org-protocol-default-template-key))
-             (url (org-protocol-sanitize-uri (plist-get data :url)))
-             (type (if (string-match "^\\([a-z]+\\):" url)
-                       (match-string 1 url)))
-             (html (org-protocol-capture-html--url-html url))
-             (result (org-protocol-capture-html--eww-readable html))
-             (title (cdr result))
-             (content (with-temp-buffer
-                        (insert (org-protocol-capture-html--nbsp-to-space (car result)))
-                        ;; Convert to Org with Pandoc
-                        (unless (= 0 (call-process-region (point-min) (point-max)
-                                                          "pandoc" t t nil "-f" "html" "-t" "org"
-                                                          org-protocol-capture-html-pandoc-no-wrap-option))
-                          (error "Pandoc failed"))
-                        (save-excursion
-                          ;; Remove DOS CR/LF line endings
-                          (goto-char (point-min))
-                          (while (search-forward (string ?\C-m) nil t)
-                            (replace-match "")))
-                        ;; Demote page headings in capture buffer to below the
-                        ;; top-level Org heading and "Article" 2nd-level heading
-                        (save-excursion
-                          (goto-char (point-min))
-                          (while (re-search-forward (rx bol (1+ "*") (1+ space)) nil t)
-                            (beginning-of-line)
-                            (insert "**")
-                            (end-of-line)))
-                        (buffer-string)))
-             (orglink (org-make-link-string
-                       url (if (s-present? title) title url)))
-             ;; Avoid call to org-store-link
-             (org-capture-link-is-already-stored t))
+    (setq org-stored-links
+          (cons (list url title) org-stored-links))
+    (kill-new orglink)
 
-        (setq org-stored-links
-              (cons (list url title) org-stored-links))
-        (kill-new orglink)
+    (org-store-link-props :type type
+                          :annotation orglink
+                          :link url
+                          :description title
+                          :orglink orglink
+                          :initial content)
+    (org-protocol-capture-html--do-capture)
+    nil))
 
-        (org-store-link-props :type type
-                              :annotation orglink
-                              :link url
-                              :description title
-                              :orglink orglink
-                              :initial content)
-        (org-protocol-capture-html--do-capture)
-        nil))
+(add-to-list 'org-protocol-protocol-alist
+             '("capture-eww-readable"
+               :protocol "capture-eww-readable"
+               :function org-protocol-capture-html--capture-eww-readable
+               :kill-client t))
 
-    (add-to-list 'org-protocol-protocol-alist
-                 '("capture-eww-readable"
-                   :protocol "capture-eww-readable"
-                   :function org-protocol-capture-html--capture-eww-readable
-                   :kill-client t))
+(defun org-protocol-capture-html--url-html (url)
+  "Return HTML from URL as string."
+  (let* ((response-buffer (url-retrieve-synchronously url nil t))
+         (encoded-html (with-current-buffer response-buffer
+                         (pop-to-buffer response-buffer)
+                         ;; Skip HTTP headers, using marker provided by url-http
+                         (delete-region (point-min) (1+ url-http-end-of-headers))
+                         (buffer-string))))
+    (kill-buffer response-buffer)     ; Not sure if necessary to avoid leaking buffer
+    (with-temp-buffer
+      ;; For some reason, running `decode-coding-region' in the
+      ;; response buffer has no effect, so we have to do it in a
+      ;; temp buffer.
+      (insert encoded-html)
+      (condition-case nil
+          ;; Fix undecoded text
+          (decode-coding-region (point-min) (point-max) 'utf-8)
+        (coding-system-error nil))
+      (buffer-string))))
 
-    (defun org-protocol-capture-html--url-html (url)
-      "Return HTML from URL as string."
-      (let* ((response-buffer (url-retrieve-synchronously url nil t))
-             (encoded-html (with-current-buffer response-buffer
-                             (pop-to-buffer response-buffer)
-                             ;; Skip HTTP headers, using marker provided by url-http
-                             (delete-region (point-min) (1+ url-http-end-of-headers))
-                             (buffer-string))))
-        (kill-buffer response-buffer)     ; Not sure if necessary to avoid leaking buffer
-        (with-temp-buffer
-          ;; For some reason, running `decode-coding-region' in the
-          ;; response buffer has no effect, so we have to do it in a
-          ;; temp buffer.
-          (insert encoded-html)
-          (condition-case nil
-              ;; Fix undecoded text
-              (decode-coding-region (point-min) (point-max) 'utf-8)
-            (coding-system-error nil))
-          (buffer-string))))
-
-    (defun org-protocol-capture-html--eww-readable (html)
-      "Return `eww-readable' part of HTML with title.
+(defun org-protocol-capture-html--eww-readable (html)
+  "Return `eww-readable' part of HTML with title.
 Returns list (HTML . TITLE)."
-      ;; Based on `eww-readable'
-      (let* ((html
-              ;; Convert "&nbsp;" in HTML to plain spaces.
-              ;; `libxml-parse-html-region' turns them into
-              ;; underlines.  The closest I can find to an explanation
-              ;; is at <http://www.perlmonks.org/?node_id=825188>.
-              (org-protocol-capture-html--nbsp-to-space html))
-             (dom (with-temp-buffer
-                    (insert html)
-                    (libxml-parse-html-region (point-min) (point-max))))
-             (title (cl-caddr (car (dom-by-tag dom 'title)))))
-        (eww-score-readability dom)
-        (cons (with-temp-buffer
-                (shr-dom-print (eww-highest-readability dom))
-                (buffer-string))
-              title)))))
+  ;; Based on `eww-readable'
+  (let* ((html
+          ;; Convert "&nbsp;" in HTML to plain spaces.
+          ;; `libxml-parse-html-region' turns them into
+          ;; underlines.  The closest I can find to an explanation
+          ;; is at <http://www.perlmonks.org/?node_id=825188>.
+          (org-protocol-capture-html--nbsp-to-space html))
+         (dom (with-temp-buffer
+                (insert html)
+                (libxml-parse-html-region (point-min) (point-max))))
+         (title (cl-caddr (car (dom-by-tag dom 'title)))))
+    (eww-score-readability dom)
+    (cons (with-temp-buffer
+            (shr-dom-print (eww-highest-readability dom))
+            (buffer-string))
+          title)))
 
 ;;;; Helper functions
 
